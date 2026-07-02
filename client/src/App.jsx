@@ -51,6 +51,8 @@ export default function App() {
     }).catch(() => setCatalog([]));
   }, []);
 
+  const meta = useMemo(() => Object.fromEntries(catalog.map((m) => [m.id, m])), [catalog]);
+
   // load data for a set of ids over the range
   const load = useCallback(async (ids, [s, e]) => {
     if (!ids.length) return;
@@ -86,7 +88,6 @@ export default function App() {
     setYKey((k) => (Object.keys(raw[k] || {}).length ? k : (withData.find((id) => meta[id]?.region === "India") || withData[0])));
   }, [raw, meta]);
 
-  const meta = useMemo(() => Object.fromEntries(catalog.map((m) => [m.id, m])), [catalog]);
 
   // aligned value arrays over the year axis (nulls where missing)
   const aligned = useMemo(() => {
