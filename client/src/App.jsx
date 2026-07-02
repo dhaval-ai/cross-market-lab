@@ -35,28 +35,48 @@ export default function App() {
   const [rollWin, setRollWin] = useState(6);
 
   // load catalog once
+  const [allIds, setAllIds] = useState([]);
+
   useEffect(() => {
     fetch("/api/catalog").then((r) => r.json()).then((c) => {
       setCatalog(c);
+      setAllIds(c.map((m) => m.id));
       setSelected(c.slice(0, 8).map((m) => m.id));
+      if (c.length) {
+        const first = c[0].id;
+        const firstIndia = (c.find((m) => m.region === "India") || c[0]).id;
+        setXKey((k) => (c.some((m) => m.id === k) ? k : first));
+        setYKey((k) => (c.some((m) => m.id === k) ? k : firstIndia));
+      }
     }).catch(() => setCatalog([]));
   }, []);
 
-  // load data whenever selection or range changes
+  // load data for a set of ids over the range
   const load = useCallback(async (ids, [s, e]) => {
     if (!ids.length) return;
     setLoading(true);
     try {
-      const r = await fetch(`/api/data?ids=${ids.join(",")}&start=${s}&end=${e}`);
-      const j = await r.json();
-      setRaw((prev) => ({ ...prev, ...j.series }));
-      setErrors(j.errors || {});
-      const ys = []; for (let y = j.start; y <= j.end; y++) ys.push(y);
+      const chunks = [];
+      for (let i = 0; i < ids.length; i += 8) chunks.push(ids.slice(i, i + 8));
+      let start = s, end = e; const merged = {}; const errs = {};
+      for (const ch of chunks) {
+        const r = await fetch(`/api/data?ids=${ch.join(",")}&start=${s}&end=${e}`);
+        const j = await r.json();
+        Object.assign(merged, j.series || {});
+        Object.assign(errs, j.errors || {});
+        start = j.start; end = j.end;
+      }
+      setRaw((prev) => ({ ...prev, ...merged }));
+      setErrors(errs);
+      const ys = []; for (let y = start; y <= end; y++) ys.push(y);
       setYears(ys);
     } finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { if (selected.length) load(selected, range); }, [selected, range, load]);
+  // fetch ALL catalog metrics once loaded, and whenever the year range changes.
+  // Toggling chips then only controls what's DISPLAYED, not what's fetched —
+  // so every metric (incl. picker choices in other tabs) always has data.
+  useEffect(() => { if (allIds.length) load(allIds, range); }, [allIds, range, load]);
 
   const meta = useMemo(() => Object.fromEntries(catalog.map((m) => [m.id, m])), [catalog]);
 
