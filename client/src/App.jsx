@@ -29,8 +29,8 @@ export default function App() {
   const [selected, setSelected] = useState([]);
   const [mode, setMode] = useState("returns");
   const [tab, setTab] = useState("matrix");
-  const [xKey, setXKey] = useState("us_sp500");
-  const [yKey, setYKey] = useState("in_gdp");
+  const [xKey, setXKey] = useState("us_gdpgr_wb");
+  const [yKey, setYKey] = useState("in_gdp_growth");
   const [maxLag, setMaxLag] = useState(3);
   const [rollWin, setRollWin] = useState(6);
 
@@ -78,6 +78,14 @@ export default function App() {
   // so every metric (incl. picker choices in other tabs) always has data.
   useEffect(() => { if (allIds.length) load(allIds, range); }, [allIds, range, load]);
 
+  // once data is in, make sure the pair points at metrics that actually returned data
+  useEffect(() => {
+    const withData = Object.keys(raw).filter((id) => Object.keys(raw[id] || {}).length > 0);
+    if (!withData.length) return;
+    setXKey((k) => (Object.keys(raw[k] || {}).length ? k : (withData.find((id) => meta[id]?.region === "US") || withData[0])));
+    setYKey((k) => (Object.keys(raw[k] || {}).length ? k : (withData.find((id) => meta[id]?.region === "India") || withData[0])));
+  }, [raw, meta]);
+
   const meta = useMemo(() => Object.fromEntries(catalog.map((m) => [m.id, m])), [catalog]);
 
   // aligned value arrays over the year axis (nulls where missing)
@@ -120,6 +128,9 @@ export default function App() {
   const [px, py] = pairSeries(xKey, yKey);
   const pairR = pearson(px, py);
   const scatter = px.map((x, i) => ({ x, y: py[i] }));
+  const xHasData = Object.keys(raw[xKey] || {}).length > 0;
+  const yHasData = Object.keys(raw[yKey] || {}).length > 0;
+  const pairPlottable = scatter.length >= 2;
 
   const lagScan = useMemo(() => {
     const xs = raw[xKey] || {}, ys = raw[yKey] || {};
@@ -158,6 +169,54 @@ export default function App() {
   const toggle = (id) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   const cellColor = (r) => { if (isNaN(r)) return "#1b1f2a"; const a = Math.abs(r); return `hsl(${r >= 0 ? 205 : 14} 70% ${18 + a * 34}%)`; };
 
+  // ---- VALIDATION: per-metric health ----
+  const health = useMemo(() => catalog.map((m) => {
+    const pts = raw[m.id] ? Object.keys(raw[m.id]).length : 0;
+    const ys = raw[m.id] ? Object.keys(raw[m.id]).map(Number).sort((a, b) => a - b) : [];
+    let status = "ok";
+    if (errors[m.id]) status = "error";
+    else if (pts === 0) status = (loading ? "loading" : "empty");
+    else if (pts < 3) status = "sparse";
+    return { ...m, pts, first: ys[0], last: ys[ys.length - 1], status, error: errors[m.id] || null };
+  }), [catalog, raw, errors, loading]);
+
+  // ---- VALIDATION: per-source rollup ----
+  const sourceHealth = useMemo(() => {
+    const groups = {};
+    for (const h of health) {
+      const key = h.source === "fred" ? "FRED" : "World Bank";
+      (groups[key] ||= { total: 0, ok: 0, empty: 0, error: 0 });
+      groups[key].total++;
+      if (h.status === "ok" || h.status === "sparse") groups[key].ok++;
+      else if (h.status === "error") groups[key].error++;
+      else if (h.status === "empty") groups[key].empty++;
+    }
+    return groups;
+  }, [health]);
+
+  // ---- VALIDATION: is each tab's current view actually plottable? ----
+  const hasData = (id) => (raw[id] ? Object.keys(raw[id]).length > 0 : false);
+  const selectedWithData = selected.filter(hasData);
+  const tabStatus = {
+    matrix: selectedWithData.length >= 2
+      ? { ok: true, msg: `${selectedWithData.length} metrics with data` }
+      : { ok: false, msg: "Select at least 2 metrics that have data" },
+    pair: (hasData(xKey) && hasData(yKey))
+      ? { ok: true, msg: `${shortLabel(meta[xKey]?.label || "X")} & ${shortLabel(meta[yKey]?.label || "Y")} loaded` }
+      : { ok: false, msg: `Missing data: ${!hasData(xKey) ? shortLabel(meta[xKey]?.label || "X") : ""}${!hasData(xKey) && !hasData(yKey) ? " & " : ""}${!hasData(yKey) ? shortLabel(meta[yKey]?.label || "Y") : ""}` },
+    rolling: (hasData(xKey) && hasData(yKey))
+      ? { ok: true, msg: `pair loaded` }
+      : { ok: false, msg: `Missing data for the selected pair` },
+    normalize: selectedWithData.length >= 1
+      ? { ok: true, msg: `${selectedWithData.length} metrics with data` }
+      : { ok: false, msg: "No selected metrics have data" },
+    health: { ok: true, msg: "" },
+  };
+  const statusColor = { ok: "#3fb950", sparse: "#d29922", empty: "#8b949e", error: "#f85149", loading: "#4ea1ff" };
+  const statusLabel = { ok: "OK", sparse: "Sparse", empty: "No data", error: "Error", loading: "Loading" };
+
+  const refresh = () => { setRaw({}); if (allIds.length) load(allIds, range); };
+
   return (
     <div style={S.root}>
       <style>{CSS}</style>
@@ -181,28 +240,58 @@ export default function App() {
         </div>
       </header>
 
-      {loading && <div style={S.loading}>Fetching live data…</div>}
-      {Object.keys(errors).length > 0 && (
-        <div style={S.errBox}>Some series unavailable: {Object.entries(errors).map(([k, v]) => `${meta[k]?.label || k} (${v})`).join(" · ")}</div>
+      {/* SOURCE HEALTH STRIP — always visible validation of data pulls */}
+      <section style={S.srcStrip}>
+        {Object.entries(sourceHealth).map(([name, s]) => {
+          const allOk = s.ok === s.total, someOk = s.ok > 0;
+          const col = loading ? "#4ea1ff" : allOk ? "#3fb950" : someOk ? "#d29922" : "#f85149";
+          return (
+            <div key={name} style={S.srcPill} title={`${name}: ${s.ok}/${s.total} series returned data`}>
+              <span style={{ ...S.srcDot, background: col }} />
+              <b style={S.srcName}>{name}</b>
+              <span style={S.srcCount}>{loading ? "checking…" : `${s.ok}/${s.total} live`}</span>
+              {!loading && s.error > 0 && <span style={S.srcErr}>{s.error} err</span>}
+              {!loading && s.empty > 0 && <span style={S.srcEmpty}>{s.empty} empty</span>}
+            </div>
+          );
+        })}
+        <button onClick={refresh} style={S.refreshBtn} disabled={loading}>{loading ? "Loading…" : "↻ Refresh"}</button>
+        <button onClick={() => setTab("health")} style={S.detailBtn}>Data health →</button>
+      </section>
+
+      {Object.keys(errors).length > 0 && !loading && (
+        <div style={S.errBox}>Series that returned no data: {Object.entries(errors).map(([k, v]) => `${meta[k]?.label || k} (${v})`).join(" · ")}</div>
       )}
 
       {/* metric chips grouped by region */}
       <section style={S.chips}>
         {catalog.map((m) => {
           const on = selected.includes(m.id); const c = REGION_COLORS[m.region];
+          const h = health.find((x) => x.id === m.id);
+          const bad = h && (h.status === "empty" || h.status === "error");
           return (
-            <button key={m.id} onClick={() => toggle(m.id)} style={{ ...S.chip, borderColor: on ? c : "#2a2f3c", background: on ? `${c}22` : "transparent", color: on ? "#e8ecf3" : "#7c8595" }}>
-              <span style={{ ...S.dot, background: c, opacity: on ? 1 : .35 }} />{m.label}
+            <button key={m.id} onClick={() => toggle(m.id)} title={h ? `${statusLabel[h.status]}${h.pts ? ` · ${h.pts} yrs (${h.first}–${h.last})` : ""}${h.error ? ` · ${h.error}` : ""}` : ""}
+              style={{ ...S.chip, borderColor: on ? c : "#2a2f3c", background: on ? `${c}22` : "transparent", color: on ? "#e8ecf3" : "#7c8595", opacity: bad ? 0.55 : 1 }}>
+              <span style={{ ...S.dot, background: bad ? "#f85149" : c, opacity: on ? 1 : .35 }} />{m.label}
+              {bad && <span style={S.chipWarn}>⚠</span>}
             </button>
           );
         })}
       </section>
 
       <nav style={S.tabs}>
-        {[["matrix", "Correlation matrix"], ["pair", "Pair & lead-lag"], ["rolling", "Rolling correlation"], ["normalize", "Normalized overlay"]].map(([id, l]) => (
+        {[["matrix", "Correlation matrix"], ["pair", "Pair & lead-lag"], ["rolling", "Rolling correlation"], ["normalize", "Normalized overlay"], ["health", "Data health"]].map(([id, l]) => (
           <button key={id} onClick={() => setTab(id)} style={{ ...S.tab, ...(tab === id ? S.tabOn : {}) }}>{l}</button>
         ))}
       </nav>
+
+      {/* PER-TAB READINESS BANNER */}
+      {tab !== "health" && (
+        <div style={{ ...S.readyBanner, borderColor: tabStatus[tab].ok ? "#1a3a24" : "#4a2318", background: tabStatus[tab].ok ? "#0f1f14" : "#1f1410" }}>
+          <span style={{ ...S.srcDot, background: tabStatus[tab].ok ? "#3fb950" : "#f85149" }} />
+          <span style={S.readyMsg}>{tabStatus[tab].ok ? "Ready — " : "Can't plot — "}{tabStatus[tab].msg}</span>
+        </div>
+      )}
 
       {tab === "matrix" && (
         <div style={S.grid2}>
@@ -248,12 +337,21 @@ export default function App() {
           </div>
           <div style={S.grid2}>
             <div style={S.card}><div style={S.cardTitle}>Scatter <span style={S.muted}>· each point = one year</span></div>
+              {pairPlottable ? (
               <ResponsiveContainer width="100%" height={300}><ScatterChart margin={{ top: 10, right: 16, bottom: 24, left: 8 }}>
                 <CartesianGrid stroke="#232838" /><XAxis type="number" dataKey="x" stroke="#6b7280" tick={{ fontSize: 11, fill: "#8b94a3" }} label={{ value: shortLabel(meta[xKey]?.label || ""), position: "bottom", fill: "#8b94a3", fontSize: 11 }} />
                 <YAxis type="number" dataKey="y" stroke="#6b7280" tick={{ fontSize: 11, fill: "#8b94a3" }} /><ZAxis range={[70, 70]} />
                 <Tooltip contentStyle={S.tip} formatter={(v) => (typeof v === "number" ? v.toFixed(2) : v)} labelFormatter={() => ""} />
                 <Scatter data={scatter}>{scatter.map((_, i) => <Cell key={i} fill={`hsl(205 70% ${45 + i * 2}%)`} />)}</Scatter>
               </ScatterChart></ResponsiveContainer>
+              ) : (
+                <div style={S.noData}>
+                  No overlapping data to plot.<br />
+                  {!xHasData && <span>{shortLabel(meta[xKey]?.label || "X")} has no data{meta[xKey]?.source === "fred" ? " (check FRED_API_KEY)" : ""}. </span>}
+                  {!yHasData && <span>{shortLabel(meta[yKey]?.label || "Y")} has no data{meta[yKey]?.source === "fred" ? " (check FRED_API_KEY)" : ""}. </span>}
+                  {xHasData && yHasData && <span>The two series don't share any years in this range — try widening the year range.</span>}
+                </div>
+              )}
             </div>
             <div style={S.card}><div style={S.cardTitle}>Lead / lag scan <span style={S.muted}>· does X move before Y?</span></div>
               <div style={S.lagCtrl}><label style={S.muted}>Max lag (yrs): {maxLag}</label><input type="range" min={1} max={6} value={maxLag} onChange={(e) => setMaxLag(+e.target.value)} style={{ width: 130 }} /></div>
@@ -276,12 +374,21 @@ export default function App() {
             <Picker label="Metric Y" value={yKey} onChange={setYKey} catalog={catalog} />
             <div style={S.lagCtrl}><label style={S.muted}>Window: {rollWin}yr</label><input type="range" min={3} max={10} value={rollWin} onChange={(e) => setRollWin(+e.target.value)} style={{ width: 130 }} /></div>
           </div>
+          {rolling.some((d) => d.r != null) ? (
           <ResponsiveContainer width="100%" height={340}><AreaChart data={rolling} margin={{ top: 10, right: 20, bottom: 4, left: 0 }}>
             <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4ea1ff" stopOpacity={.5} /><stop offset="100%" stopColor="#4ea1ff" stopOpacity={0} /></linearGradient></defs>
             <CartesianGrid stroke="#232838" /><XAxis dataKey="year" stroke="#6b7280" tick={{ fontSize: 11, fill: "#8b94a3" }} /><YAxis domain={[-1, 1]} stroke="#6b7280" tick={{ fontSize: 11, fill: "#8b94a3" }} />
             <ReferenceLine y={0} stroke="#3a4152" /><Tooltip contentStyle={S.tip} formatter={(v) => (v == null ? "n/a" : v.toFixed(2))} />
             <Area dataKey="r" stroke="#4ea1ff" strokeWidth={2} fill="url(#g)" connectNulls />
           </AreaChart></ResponsiveContainer>
+          ) : (
+            <div style={{ ...S.noData, height: 340 }}>
+              Not enough overlapping data for a {rollWin}-year rolling window.<br />
+              {!xHasData && <span>{shortLabel(meta[xKey]?.label || "X")} has no data{meta[xKey]?.source === "fred" ? " (check FRED_API_KEY)" : ""}. </span>}
+              {!yHasData && <span>{shortLabel(meta[yKey]?.label || "Y")} has no data{meta[yKey]?.source === "fred" ? " (check FRED_API_KEY)" : ""}. </span>}
+              {xHasData && yHasData && <span>Try a smaller window or a wider year range.</span>}
+            </div>
+          )}
           <div style={S.muted}>Shows how the relationship <i>changes</i> over time. A line that swings from positive to negative signals a regime shift — the two markets decoupled or flipped. Flat high values mean a stable link you can lean on.</div>
         </div>
       )}
@@ -298,7 +405,49 @@ export default function App() {
         </div>
       )}
 
-      <footer style={S.footer}>Data: FRED (Federal Reserve Bank of St. Louis) and World Bank Open Data, fetched live and aggregated to annual. Correlation is not causation; annual samples are small — treat findings as hypotheses, not signals. Not investment advice.</footer>
+      {tab === "health" && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>Data health <span style={S.muted}>· live validation of every source & metric · range {range[0]}–{range[1]}</span></div>
+          <div style={S.healthSummary}>
+            {Object.entries(sourceHealth).map(([name, s]) => (
+              <div key={name} style={S.healthCard}>
+                <div style={S.healthCardName}>{name}</div>
+                <div style={S.healthCardBig}>{s.ok}<span style={S.healthCardTot}>/{s.total}</span></div>
+                <div style={S.healthCardSub}>series returned data</div>
+                <div style={S.healthCardBreak}>
+                  {s.error > 0 && <span style={{ color: "#f85149" }}>{s.error} error</span>}
+                  {s.empty > 0 && <span style={{ color: "#8b949e" }}>{s.empty} empty</span>}
+                  {s.error === 0 && s.empty === 0 && <span style={{ color: "#3fb950" }}>all healthy</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ overflowX: "auto", marginTop: 6 }}>
+            <table style={S.healthTable}>
+              <thead><tr>
+                <th style={S.hTh}>Metric</th><th style={S.hTh}>Region</th><th style={S.hTh}>Source</th>
+                <th style={S.hTh}>Status</th><th style={S.hTh}>Years</th><th style={S.hTh}>Range</th><th style={S.hTh}>Detail</th>
+              </tr></thead>
+              <tbody>
+                {health.map((h) => (
+                  <tr key={h.id} style={{ opacity: h.status === "empty" || h.status === "error" ? 0.85 : 1 }}>
+                    <td style={S.hTd}>{h.label}</td>
+                    <td style={S.hTd}><span style={{ ...S.dot, background: REGION_COLORS[h.region] }} /> {h.region}</td>
+                    <td style={S.hTdMono}>{h.source === "fred" ? "FRED" : "World Bank"}</td>
+                    <td style={S.hTd}><span style={{ ...S.statusPill, background: `${statusColor[h.status]}22`, color: statusColor[h.status], borderColor: `${statusColor[h.status]}55` }}>{statusLabel[h.status]}</span></td>
+                    <td style={S.hTdMono}>{h.pts || "–"}</td>
+                    <td style={S.hTdMono}>{h.first ? `${h.first}–${h.last}` : "–"}</td>
+                    <td style={S.hTdDetail}>{h.error || (h.status === "sparse" ? "few points; correlations unreliable" : h.status === "empty" ? (h.source === "fred" ? "no data — check FRED_API_KEY or year range" : "no data for this range (WB may lag 1–2 yrs)") : "")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={S.healthNote}>
+            <b>How to read this:</b> Each metric is pulled live when the app loads. <span style={{ color: "#3fb950" }}>OK</span> = data returned. <span style={{ color: "#d29922" }}>Sparse</span> = fewer than 3 years (correlations shaky). <span style={{ color: "#8b949e" }}>No data</span> = the source returned nothing for this range. <span style={{ color: "#f85149" }}>Error</span> = the request failed (message shown in Detail). If <b>all FRED rows</b> are empty, the server's <code>FRED_API_KEY</code> isn't set or is invalid. If <b>only recent years</b> are missing for World Bank India series, that's normal reporting lag, not a fault. Use <b>Refresh</b> above to re-pull.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -353,6 +502,31 @@ const S = {
   rStatVal: { fontFamily: "'Space Grotesk',sans-serif", fontSize: 30, fontWeight: 600, lineHeight: 1 }, rStatSub: { fontSize: 11, color: "#6b7280" },
   tip: { background: "#11141d", border: "1px solid #2a2f3c", borderRadius: 8, fontSize: 12, color: "#e8ecf3" },
   lagCtrl: { display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }, lagNote: { fontSize: 12, color: "#8b94a3", marginTop: 8, lineHeight: 1.5 },
+  noData: { height: 300, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", color: "#7c8595", fontSize: 13, lineHeight: 1.7, padding: 20 },
+  srcStrip: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 },
+  srcPill: { display: "inline-flex", alignItems: "center", gap: 7, background: "#11141d", border: "1px solid #1e232f", borderRadius: 10, padding: "7px 11px", fontSize: 12 },
+  srcDot: { width: 9, height: 9, borderRadius: "50%", display: "inline-block", flexShrink: 0 },
+  srcName: { fontSize: 12, fontWeight: 600 }, srcCount: { color: "#8b94a3", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace" },
+  srcErr: { color: "#f85149", fontSize: 10.5, background: "#f8514918", padding: "1px 6px", borderRadius: 5 },
+  srcEmpty: { color: "#8b949e", fontSize: 10.5, background: "#8b949e18", padding: "1px 6px", borderRadius: 5 },
+  refreshBtn: { background: "#1a1f2b", border: "1px solid #2a2f3c", color: "#e8ecf3", borderRadius: 9, padding: "7px 12px", fontSize: 12, cursor: "pointer" },
+  detailBtn: { background: "transparent", border: "1px solid #2a2f3c", color: "#8b94a3", borderRadius: 9, padding: "7px 12px", fontSize: 12, cursor: "pointer", marginLeft: "auto" },
+  chipWarn: { color: "#f85149", marginLeft: 4, fontSize: 11 },
+  readyBanner: { display: "flex", alignItems: "center", gap: 9, border: "1px solid", borderRadius: 10, padding: "8px 12px", marginBottom: 14, fontSize: 12.5 },
+  readyMsg: { color: "#c9d1d9" },
+  healthSummary: { display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 },
+  healthCard: { flex: "1 1 160px", background: "#0f131c", border: "1px solid #1e232f", borderRadius: 12, padding: "14px 16px" },
+  healthCardName: { fontSize: 12, color: "#8b94a3", fontWeight: 600, letterSpacing: ".04em" },
+  healthCardBig: { fontFamily: "'Space Grotesk',sans-serif", fontSize: 32, fontWeight: 600, lineHeight: 1.1, marginTop: 4 },
+  healthCardTot: { fontSize: 18, color: "#5b6472" }, healthCardSub: { fontSize: 11, color: "#6b7280" },
+  healthCardBreak: { fontSize: 11, marginTop: 8, display: "flex", gap: 10, fontFamily: "'JetBrains Mono',monospace" },
+  healthTable: { borderCollapse: "collapse", fontSize: 12, width: "100%" },
+  hTh: { textAlign: "left", padding: "8px 10px", color: "#6b7280", fontWeight: 500, fontSize: 11, borderBottom: "1px solid #1e232f", whiteSpace: "nowrap" },
+  hTd: { padding: "7px 10px", borderBottom: "1px solid #161b26", whiteSpace: "nowrap" },
+  hTdMono: { padding: "7px 10px", borderBottom: "1px solid #161b26", fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: "#8b94a3" },
+  hTdDetail: { padding: "7px 10px", borderBottom: "1px solid #161b26", color: "#6b7280", fontSize: 11, maxWidth: 260, whiteSpace: "normal" },
+  statusPill: { fontSize: 10.5, padding: "2px 8px", borderRadius: 20, border: "1px solid", fontWeight: 600, fontFamily: "'JetBrains Mono',monospace" },
+  healthNote: { marginTop: 16, fontSize: 11.5, color: "#8b94a3", lineHeight: 1.7, background: "#0f131c", border: "1px solid #1e232f", borderRadius: 10, padding: "12px 14px" },
   footer: { marginTop: 26, color: "#4b5261", fontSize: 11.5, lineHeight: 1.6, borderTop: "1px solid #161b26", paddingTop: 14 },
 };
 const CSS = `@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');

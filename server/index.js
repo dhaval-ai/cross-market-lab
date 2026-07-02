@@ -41,12 +41,32 @@ async function fetchFred(m, start, end) {
 // ---- fetch a World Bank series (already annual) ----
 async function fetchWorldBank(m, start, end) {
   const url = `https://api.worldbank.org/v2/country/${m.country}/indicator/${m.series}?format=json&per_page=20000&date=${start}:${end}`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`WB ${m.series} ${r.status}`);
-  const j = await r.json();
-  const out = {};
-  for (const o of j[1] || []) if (o.value != null) out[+o.date] = o.value;
-  return out;
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 12000);
+      const r = await fetch(url, {
+        signal: ctrl.signal,
+        headers: { "Accept": "application/json", "User-Agent": "cross-market-lab/1.0" },
+      });
+      clearTimeout(t);
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      // World Bank returns [meta, data]. On error it returns [{message:[...]}].
+      if (!Array.isArray(j)) throw new Error("unexpected response shape");
+      if (j[0] && j[0].message) throw new Error(j[0].message[0]?.value || "WB API message");
+      const rows = j[1];
+      if (!Array.isArray(rows)) throw new Error("no data array (indicator/country may be invalid)");
+      const out = {};
+      for (const o of rows) if (o && o.value != null) out[+o.date] = o.value;
+      return out;
+    } catch (e) {
+      lastErr = e;
+      await new Promise((res) => setTimeout(res, 400 * (attempt + 1)));
+    }
+  }
+  throw new Error(`WB ${m.series}: ${lastErr?.message || "failed"}`);
 }
 
 async function getSeries(id, start, end) {
@@ -63,6 +83,22 @@ async function getSeries(id, start, end) {
 // list available metrics (drives the UI configurability)
 app.get("/api/catalog", (_req, res) => {
   res.json(CATALOG.map(({ id, label, region, unit, source }) => ({ id, label, region, unit, source })));
+});
+
+// debug: test one series and report exactly what happened.
+// e.g. /api/debug?id=in_gdp
+app.get("/api/debug", async (req, res) => {
+  const id = String(req.query.id || "in_gdp");
+  const m = byId[id];
+  if (!m) return res.status(404).json({ ok: false, error: `unknown metric ${id}` });
+  try {
+    const data = await getSeries(id, 2000, new Date().getFullYear());
+    const years = Object.keys(data);
+    res.json({ ok: true, id, source: m.source, series: m.series, country: m.country || null,
+      count: years.length, firstYear: years[0], lastYear: years[years.length - 1], sample: data });
+  } catch (e) {
+    res.status(200).json({ ok: false, id, source: m.source, series: m.series, country: m.country || null, error: e.message });
+  }
 });
 
 // fetch many series at once: /api/data?ids=us_sp500,in_gdp&start=2005&end=2024
