@@ -1,0 +1,40 @@
+Subject: Please review — US ↔ India market correlation app
+
+Hi,
+
+I've built a small web app for exploring correlations between US and India
+market & macro metrics, and I'd value your review.
+
+Live link:  [PASTE YOUR https://...onrender.com URL HERE]
+
+You don't need to install anything — just open the link in a browser.
+
+Note: if it's the first time anyone's opened it in a while, the page may take
+30–60 seconds to load the first time (the free host puts it to sleep when idle).
+After that it's quick.
+
+What to try:
+  • Toggle metrics on/off using the chips at the top.
+  • Switch between "Levels" and "YoY moves" (top right) — YoY moves is the more
+    honest measure of whether two things actually move together.
+  • "Correlation matrix" tab: see all relationships at a glance; the panel on the
+    right ranks the strongest US↔India links. Click any to inspect it.
+  • "Pair & lead-lag" tab: pick any two metrics; the lead/lag chart tests whether
+    one tends to move BEFORE the other.
+  • "Rolling correlation" tab: shows how a relationship changes over time
+    (useful for spotting when two markets decoupled).
+  • "Normalized overlay" tab: rebases everything to 100 to compare growth paths.
+
+Data is pulled live from FRED (US markets, rates, commodities, USD/INR) and the
+World Bank (India & US macro).
+
+Feedback I'm looking for:
+  • Are the right metrics included? Anything missing you'd want?
+  • Do the analyses surface anything useful / are they clear?
+  • Anything confusing in the UI?
+
+A caveat I'd flag myself: the data is annual, so samples are small — the app is
+built for generating hypotheses to investigate, not trading signals. It's not
+investment advice.
+
+Thanks!
